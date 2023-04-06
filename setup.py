@@ -5,6 +5,7 @@ setup(
     packages=["mmcr"],
     install_requires=[
         'librosa >= 0.8',
+        'pyspark==3.3.2',
         'torchaudio_augmentations==0.2.1', # for augmentation
         'numpy',
         'pandas',

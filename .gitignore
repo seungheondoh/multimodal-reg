@@ -5,3 +5,4 @@ exp/
 *.npy
 __pycache__
 mmcr.egg-info
+notebook/

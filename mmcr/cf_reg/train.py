@@ -12,7 +12,7 @@ import torch
 import torch.backends.cudnn as cudnn
 # backbones
 from mmcr.cf_reg.model import CFREG
-from mmcr.cf_reg.loader.data_manger import get_dataloader
+from mmcr.cf_reg.dataset import M4A_Dataset
 from mmcr.utils.train_utils import Logger, AverageMeter, ProgressMeter, EarlyStopping, save_hparams
 from sklearn import metrics
 
@@ -32,18 +32,18 @@ parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
 parser.add_argument('-b', '--batch-size', default=1024, type=int, metavar='N')
 parser.add_argument('--world-size', default=1, type=int,
                     help='number of nodes for distributed training')
-parser.add_argument('--lr', '--learning-rate', default=1e-4, type=float,
+parser.add_argument('--lr', '--learning-rate', default=5e-5, type=float,
                     metavar='LR', help='initial learning rate', dest='lr')
 parser.add_argument('--min_lr', default=1e-9, type=float)
 parser.add_argument('--seed', default=None, type=int,
                     help='seed for initializing training.')
-parser.add_argument('--gpu', default=7, type=int,
+parser.add_argument('--gpu', default=0, type=int,
                     help='GPU id to use.')
 parser.add_argument('--print_freq', default=100, type=int)
 # downstream options
-parser.add_argument("--modality", default="vat", type=str)
+parser.add_argument("--modality", default="vatg", type=str)
 parser.add_argument("--embs_type", default="average", type=str)
-parser.add_argument("--fusion_type", default="transformer", type=str)
+parser.add_argument("--fusion_type", default="mlp", type=str)
 parser.add_argument("--cls_type", default="both", type=str)
 
 parser.add_argument("--mlp_dim", default=768, type=int)
@@ -52,9 +52,10 @@ parser.add_argument("--depth", default=12, type=int)
 parser.add_argument("--tid", default=0, type=int)
 
 parser.add_argument("--output_dim", default=128, type=int)
-parser.add_argument("--v_dim", default=640, type=int)
-parser.add_argument("--a_dim", default=768, type=int)
-parser.add_argument("--t_dim", default=640, type=int)
+parser.add_argument("--v_dim", default=8192, type=int)
+parser.add_argument("--a_dim", default=100, type=int)
+parser.add_argument("--t_dim", default=1000, type=int)
+parser.add_argument("--g_dim", default=685, type=int)
 parser.add_argument("--dropout", default=0.1, type=float)
 
 
@@ -70,14 +71,22 @@ def main():
         v_dim = args.v_dim,
         a_dim = args.a_dim,
         t_dim = args.t_dim,
+        g_dim = args.g_dim,
         mlp_dim = args.mlp_dim,
         output_dim = args.output_dim,
         dropout = args.dropout,
         loss_fn = torch.nn.MSELoss(),
         cls_type = args.cls_type
     )
-    train_loader = get_dataloader(args=args, split="TRAIN")
-    val_loader = get_dataloader(args=args, split="VALID")
+    train_dataset = M4A_Dataset(data_path=args.data_path, split="TRAIN")
+    valid_dataset = M4A_Dataset(data_path=args.data_path, split="VALID")
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset, batch_size=args.batch_size, shuffle=True,
+        num_workers=args.workers, pin_memory=True, drop_last=True)
+    val_loader = torch.utils.data.DataLoader(
+        valid_dataset, batch_size=args.batch_size, shuffle=False,
+        num_workers=args.workers, pin_memory=True,  drop_last=True)
     
     torch.cuda.set_device(args.gpu)
     model = model.cuda(args.gpu) 
@@ -108,15 +117,15 @@ def train(train_loader, model, optimizer, epoch, logger, args):
     model.train()
     for data_iter_step, batch in enumerate(train_loader):
         lr = adjust_learning_rate(optimizer, data_iter_step / iters_per_epoch + epoch, args)
-        media_id, meta_id, a_embs, v_embs, t_embs, cf_embs = batch            
+        item, audio, vision, lyrics, genres, cf_vec = batch            
         if args.gpu is not None:
-            meta_id = meta_id.cuda(args.gpu, non_blocking=True)
-            v_embs = v_embs.cuda(args.gpu, non_blocking=True)
-            a_embs = a_embs.cuda(args.gpu, non_blocking=True)
-            t_embs = t_embs.cuda(args.gpu, non_blocking=True)
-            y = cf_embs.cuda(args.gpu, non_blocking=True)
+            vision = vision.cuda(args.gpu, non_blocking=True)
+            audio = audio.cuda(args.gpu, non_blocking=True)
+            lyrics = lyrics.cuda(args.gpu, non_blocking=True)
+            genres = genres.cuda(args.gpu, non_blocking=True)
+            y = cf_vec.cuda(args.gpu, non_blocking=True)
         # compute output
-        loss = model(v_embs, a_embs, t_embs, y, meta_id)
+        loss = model(audio, vision, lyrics, genres, y)
         train_losses.step(loss.item(), y.size(0))
         logger.log_train_loss(loss, epoch * iters_per_epoch + data_iter_step)
         logger.log_learning_rate(lr, epoch * iters_per_epoch + data_iter_step)
@@ -132,16 +141,16 @@ def validate(val_loader, model, epoch, args):
     model.eval()
     epoch_end_loss = []
     for data_iter_step, batch in enumerate(val_loader):
-        media_id, meta_id, a_embs, v_embs, t_embs, cf_embs = batch
+        item, audio, vision, lyrics, genres, cf_vec = batch            
         if args.gpu is not None:
-            meta_id = meta_id.cuda(args.gpu, non_blocking=True)
-            v_embs = v_embs.cuda(args.gpu, non_blocking=True)
-            a_embs = a_embs.cuda(args.gpu, non_blocking=True)
-            t_embs = t_embs.cuda(args.gpu, non_blocking=True)
-            y = cf_embs.cuda(args.gpu, non_blocking=True)
+            vision = vision.cuda(args.gpu, non_blocking=True)
+            audio = audio.cuda(args.gpu, non_blocking=True)
+            lyrics = lyrics.cuda(args.gpu, non_blocking=True)
+            genres = genres.cuda(args.gpu, non_blocking=True)
+            y = cf_vec.cuda(args.gpu, non_blocking=True)
         # compute output
         with torch.no_grad():
-            loss = model(v_embs, a_embs, t_embs, y, meta_id) # flatten batch
+            loss = model(audio, vision, lyrics, genres, y)
         epoch_end_loss.append(loss.detach().cpu())
         losses_val.step(loss.item(), y.size(0))
         if data_iter_step % args.print_freq == 0:
